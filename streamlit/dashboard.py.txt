@@ -1,0 +1,97 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from sqlalchemy import create_engine
+import country_converter as coco
+
+#  connexion PostgreSQL avec gestion d'erreur
+try:
+    engine = create_engine("postgresql://postgres@localhost:5432/pandemic")
+    connection = engine.connect()
+except Exception as e:
+    st.error(f"❌ Erreur de connexion à la base de données : {str(e)}")
+    st.stop()
+
+st.set_page_config(page_title="🦠 COVID Dashboard", layout="wide")
+
+# Sidebar with filter
+st.sidebar.title("🔎 Filtres")
+with st.sidebar:
+    try:
+        countries = pd.read_sql("SELECT DISTINCT country FROM predictions", engine)['country'].tolist()
+        selected_country = st.selectbox("Pays", ["Tous"] + countries)
+    except:
+        st.error("Aucune donnée disponible")
+        st.stop()
+
+# homepage
+st.title("📈 Surveillance Pandémique en Temps Réel")
+
+
+@st.cache_data(ttl=5)  
+def load_data(country):
+    query = "SELECT * FROM predictions" + (" WHERE country = %s" if country != "Tous" else "") + " ORDER BY timestamp DESC"
+    params = (country,) if country != "Tous" else ()
+    return pd.read_sql(query, engine, params=params)
+
+df = load_data(selected_country)
+
+if df.empty:
+    st.warning("⚠️ Aucune donnée disponible pour les critères sélectionnés")
+    st.stop()
+
+# metrics
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("🌍 Pays Surveillés", 
+             df['country'].nunique(),
+             help="Nombre de pays distincts dans le dataset")
+
+with col2:
+    avg_cases = df['predicted_cases'].mean()
+    st.metric("📈 Cas Moyens", 
+             f"{avg_cases:,.0f}".replace(",", " "),
+             help="Moyenne des cas prédits sur tous les enregistrements")
+
+with col3:
+    high_risk = df[df['risk_level'] > 0.7].shape[0]
+    st.metric("⚠️ Risque Élevé", 
+             f"{high_risk} alertes",
+             delta=f"{high_risk/len(df)*100:.1f}%",
+             help="Nombre de pays avec niveau de risque > 70%")
+
+# 📉 visualisations améliorées
+tab1, tab2 = st.tabs(["📊 Évolution Temporelle", "🗺️ Analyse Géographique"])
+
+with tab1:
+    if not df.empty:
+        fig = px.line(df, 
+                     x='timestamp', 
+                     y='predicted_cases', 
+                     color='country',
+                     title="<b>Évolution des Cas Prédits par Pays</b>",
+                     labels={'predicted_cases': 'Cas prédits', 'timestamp': 'Date'},
+                     template='plotly_white')
+        fig.update_layout(hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    df['iso_alpha'] = coco.convert(df['country'], to='ISO3')
+    
+    fig = px.choropleth(df,
+                       locations="iso_alpha",
+                       color="predicted_cases",
+                       hover_name="country",
+                       hover_data=["risk_level"],
+                       color_continuous_scale=px.colors.sequential.YlOrRd,
+                       title="<b>Répartition Géographique des Cas Prédits</b>",
+                       projection="natural earth")
+    
+    fig.update_layout(coloraxis_colorbar=dict(
+        title="Cas prédits",
+        thickness=20,
+        len=0.5
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+connection.close()

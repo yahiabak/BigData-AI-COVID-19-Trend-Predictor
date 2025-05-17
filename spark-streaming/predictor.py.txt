@@ -1,0 +1,95 @@
+# prediction real time (last version)
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import from_json, col, current_timestamp, when
+from pyspark.sql.types import *
+from pyspark.ml import PipelineModel
+
+# INITialise SPARK
+spark = SparkSession.builder \
+    .appName("🔮 Pandemic Predictor Pro") \
+    .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true") \
+    .getOrCreate()
+
+# model loading
+try:
+    print("\n🔮 Chargement des modèles...")
+    model_reg = PipelineModel.load("models/spread_model")
+    model_clf = PipelineModel.load("models/risk_model")
+    print("✅ Modèles chargés avec succès!")
+except Exception as e:
+    print(f"❌ Erreur critique: {str(e)}")
+    spark.stop()
+    exit()
+
+# Kafka schema
+schema = StructType([
+    StructField("Country", StringType()),
+    StructField("Confirmed", IntegerType()),
+    StructField("Deaths", IntegerType()),
+    StructField("Recovered", IntegerType())
+])
+
+# read kafka flux
+stream = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", "pandemics-data") \
+    .load()
+
+# transformation
+df = (
+    stream.select(
+        from_json(col("value").cast("string"), schema).alias("data")
+    )
+    .select("data.*")
+    .withColumn("Active", col("Confirmed") - (col("Deaths") + col("Recovered")))
+    .withColumn("Deaths / 100 Cases", 
+        when(col("Confirmed") != 0, (col("Deaths")/col("Confirmed"))*100).otherwise(0)
+    )
+    .dropna()
+    .withColumn("timestamp", current_timestamp())
+)
+
+# application de MODÈLES
+results_reg = model_reg.transform(df).withColumnRenamed("prediction", "predicted_cases")
+final_results = model_clf.transform(results_reg.drop("features")).withColumnRenamed("prediction", "risk_level")
+
+#  configuration postgresql
+db_config = {
+    "user": "postgres",
+    "driver": "org.postgresql.Driver",
+    "url": "jdbc:postgresql://localhost:5432/pandemic"
+}
+
+# console (debug)
+console_query = final_results.select(
+    col("Country").alias("📍 Pays"),
+    col("predicted_cases").alias("📈 Cas prédits"),
+    col("risk_level").alias("⚠️ Niveau de risque"),
+    "timestamp"
+).writeStream \
+.format("console") \
+.outputMode("append") \
+.option("truncate", "false") \
+.start()
+
+# PostgreSQL (dashboard)
+postgres_query = final_results.select(
+    col("Country").alias("country"),
+    col("predicted_cases"),
+    col("risk_level"),
+    "timestamp"
+).writeStream \
+.outputMode("append") \
+.foreachBatch(lambda df, epoch_id: 
+    df.write.jdbc(
+        url=db_config["url"],
+        table="predictions",
+        mode="append",
+        properties=db_config
+    )
+).start()
+
+print("\n🚀 Flux démarré - Données envoyées vers CONSOLE et POSTGRESQL!")
+console_query.awaitTermination()
+postgres_query.awaitTermination()

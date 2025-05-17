@@ -1,0 +1,12 @@
+from kafka import KafkaConsumer
+import json  
+
+consumer = KafkaConsumer(
+    'pandemics-data',
+    bootstrap_servers='localhost:9092',
+    value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+)
+
+print("👂 Consumer Kafka démarré...")
+for msg in consumer:
+    print(f"📊 Données reçues: {msg.value}")

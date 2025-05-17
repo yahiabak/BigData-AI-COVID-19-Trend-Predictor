@@ -1,0 +1,28 @@
+from kafka import KafkaProducer
+import pandas as pd
+import time
+import json
+
+data = pd.read_csv("data/covid_dataset.csv").fillna(0)
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+
+while True:
+    try:
+        for _, row in data.iterrows():
+            message = {
+                "Country": row["Country/Region"],
+                "Confirmed": int(row["Confirmed"]),
+                "Deaths": int(row["Deaths"]),        
+                "Recovered": int(row["Recovered"])   
+            }
+            producer.send('pandemics-data', message)
+            print(f"📤 {message['Country']} | Cas: {message['Confirmed']} | Deaths: {message['Deaths']}")
+            time.sleep(1)
+            
+    except Exception as e:
+        print(f"❌ Erreur: {str(e)}")
+        continue

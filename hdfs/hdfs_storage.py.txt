@@ -1,0 +1,15 @@
+from hdfs import InsecureClient
+import pandas as pd
+
+def store_to_hdfs():
+    client = InsecureClient("http://localhost:9870", user="ubuntu")
+    
+    # load dataset
+    df = df = pd.read_csv("/home/ubuntu/bigdata_project/data/covid_dataset.csv")
+
+    
+    # stock it in hdfs
+    with client.write("/pandemic_data/raw/covid_data.csv") as writer:
+        df.to_csv(writer, index=False)
+    
+    print("✅ Données stockées dans HDFS")

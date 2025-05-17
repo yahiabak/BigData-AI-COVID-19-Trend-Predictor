@@ -1,0 +1,121 @@
+
+from pyspark.sql import SparkSession
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml import Pipeline
+from pyspark.ml.evaluation import RegressionEvaluator, MulticlassClassificationEvaluator
+from pyspark.mllib.evaluation import MulticlassMetrics
+from pyspark.sql.types import DoubleType
+import json
+
+#  initialise SPARK
+spark = SparkSession.builder \
+    .appName("🤖 Pandemic Model Trainer v2") \
+    .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
+    .getOrCreate()
+
+# uploading data
+try:
+    df = spark.read.csv("data/covid_dataset.csv", header=True, inferSchema=True)
+    print("✅ Dataset chargé avec succès (lignes:", df.count(), ")")
+except Exception as e:
+    print(f"❌ Erreur de chargement: {str(e)}")
+    spark.stop()
+    exit()
+
+df = df.withColumn("Active", df.Confirmed - (df.Deaths + df.Recovered)) \
+       .withColumn("HighRisk", (df.Deaths / df.Confirmed > 0.05).cast("integer")) \
+       .drop("Deaths / 100 Cases")  
+
+# split  
+train, test = df.randomSplit([0.8, 0.2], seed=42)
+
+#data analyse
+print("\n🔎 Distribution des classes (test set):")
+test.groupBy("HighRisk").count().show()
+
+# FEATURES CONFIGURATION 
+features_reg = ["Confirmed", "Active"]
+features_clf = ["Confirmed", "Active"]
+
+# 🔧 pipeline regression
+assembler_reg = VectorAssembler(inputCols=features_reg, outputCol="features")
+rf = RandomForestRegressor(
+    featuresCol="features",
+    labelCol="New cases",
+    numTrees=15,
+    maxDepth=5,
+    seed=42
+)
+
+# 🔧 PIPELINE classification 
+assembler_clf = VectorAssembler(inputCols=features_clf, outputCol="features")
+lr = LogisticRegression(
+    featuresCol="features",
+    labelCol="HighRisk",
+    maxIter=10,
+    regParam=0.1
+)
+
+#  training
+print("\n🔮 Entraînement des modèles...")
+model_reg = rf.fit(assembler_reg.transform(train))
+model_clf = lr.fit(assembler_clf.transform(train))
+
+# 📊 evaluation 
+print("\n🧪 Évaluation rigoureuse:")
+
+# Régression
+reg_pred = model_reg.transform(assembler_reg.transform(test))
+rmse = RegressionEvaluator(
+    labelCol="New cases", 
+    metricName="rmse"
+).evaluate(reg_pred)
+
+# classification
+clf_pred = model_clf.transform(assembler_clf.transform(test))
+
+# conversion pour les métriques
+clf_pred = clf_pred.withColumn("label", clf_pred["HighRisk"].cast(DoubleType())) \
+                   .withColumn("prediction", clf_pred["prediction"].cast(DoubleType()))
+
+# advanced metrics
+evaluator = MulticlassClassificationEvaluator(labelCol="label")
+accuracy = evaluator.evaluate(clf_pred, {evaluator.metricName: "accuracy"})
+f1 = evaluator.evaluate(clf_pred, {evaluator.metricName: "f1"})
+
+# matrice de confusion
+metrics = MulticlassMetrics(clf_pred.select("prediction", "label").rdd)
+conf_matrix = metrics.confusionMatrix().toArray()
+
+# 💾 saving
+metrics_data = {
+    "rmse": float(rmse),
+    "accuracy": float(accuracy),
+    "f1_score": float(f1),
+    "confusion_matrix": conf_matrix.tolist()
+}
+
+with open("models/metrics.json", "w") as f:
+    json.dump(metrics_data, f, indent=2)
+
+print(f"""
+🎯 RÉSULTATS VALIDES:
+--------------------
+[🔥 Régression]
+- RMSE: {rmse:.2f}
+
+[🎯 Classification]
+- Accuracy: {accuracy:.2%}
+- F1-Score: {f1:.2%}
+
+Matrice de confusion:
+{conf_matrix}
+""")
+
+# ➕ ANALYSE DES FEATURES 
+print("\n🔍 Importance des features (Régression):")
+print(model_reg.featureImportances)
+
+spark.stop()
